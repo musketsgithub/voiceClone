@@ -25,18 +25,23 @@ class StyleConditionedCausalLM(nn.Module):
         for parameter in self.base_model.parameters():
             parameter.requires_grad = False
 
+        layers = get_decoder_layers(self.base_model)
+        self._num_layers = len(layers)
         # Persistent hooks: registered once, never removed, so gradient-checkpointing
         # recompute passes also fire them (unlike temporary hooks that are torn down
         # in a finally block before backward runs).
-        for layer in get_decoder_layers(self.base_model):
+        for layer in layers:
             layer.register_forward_pre_hook(self._inject_style)
 
     def _inject_style(self, _module, inputs):
         if self._style_shift is None:
             return
         hidden_states = inputs[0]
-        shifted = hidden_states + self._style_shift[:, None, :].to(hidden_states.dtype)
-        return (shifted, *inputs[1:])
+        # Divide by num_layers so the total gradient magnitude is independent of depth.
+        # Without this, gradients from all 28 layers accumulate and the effective LR
+        # is ~28x the nominal value, causing divergence.
+        shift = (self._style_shift / self._num_layers)[:, None, :].to(hidden_states.dtype)
+        return (hidden_states + shift, *inputs[1:])
 
     @classmethod
     def from_pretrained(
