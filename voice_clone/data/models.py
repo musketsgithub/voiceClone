@@ -39,6 +39,10 @@ class TripletRecord:
     neutral_draft: str
     doc_id: str
     token_count: int
+    structure_summary: str | None = None
+    style_guide: str | None = None
+    style_regenerated_draft: str | None = None
+    negative_type: str = "neutral"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

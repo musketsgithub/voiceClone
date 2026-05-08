@@ -2,7 +2,7 @@ from voice_clone.data.chunking import chunk_text, is_probably_front_matter, roug
 from voice_clone.data.dataset import TripletTextDataset
 from voice_clone.data.gutenberg import SMOKE_GUTENBERG_BOOKS, select_books, slugify
 from voice_clone.data.models import TripletRecord
-from voice_clone.data.pipeline import select_balanced_passages
+from voice_clone.data.pipeline import build_style_regen_triplets, select_balanced_passages
 from voice_clone.data.models import Passage
 
 
@@ -60,3 +60,25 @@ def test_select_balanced_passages_limits_each_author():
     assert len(selected) == 4
     assert sum(p.author_id == "a" for p in selected) == 2
     assert sum(p.author_id == "b" for p in selected) == 2
+
+
+def test_style_regen_triplets_work_in_dry_run(tmp_path):
+    passages_path = tmp_path / "passages.jsonl"
+    output_path = tmp_path / "style_regen.jsonl"
+    rows = [
+        Passage(f"{author}:doc:{i}", author, "doc", "enough text " * 50, 100, i).to_dict()
+        for author in ["a", "b"]
+        for i in range(3)
+    ]
+    passages_path.write_text("\n".join(__import__("json").dumps(row) for row in rows), encoding="utf-8")
+
+    records = build_style_regen_triplets(
+        passages_path,
+        output_path,
+        max_per_author=1,
+        dry_run=True,
+    )
+
+    assert len(records) == 2
+    assert records[0].negative_type == "style_regeneration"
+    assert records[0].style_regenerated_draft

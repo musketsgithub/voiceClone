@@ -33,7 +33,7 @@ class TripletTextDataset:
 
     @classmethod
     def from_jsonl(cls, path: str | Path, *, seed: int | None = None) -> "TripletTextDataset":
-        return cls([TripletRecord(**row) for row in read_jsonl(path)], seed=seed)
+        return cls([triplet_from_row(row) for row in read_jsonl(path)], seed=seed)
 
     def __len__(self) -> int:
         return len(self.valid_indices)
@@ -56,8 +56,14 @@ class TripletTextDataset:
             "positive_doc_id": positive.doc_id,
             "anchor": anchor.real_passage,
             "positive": positive.real_passage,
-            "negative": anchor.neutral_draft,
+            "negative": anchor.style_regenerated_draft or anchor.neutral_draft,
+            "negative_type": anchor.negative_type,
         }
+
+
+def triplet_from_row(row: dict[str, Any]) -> TripletRecord:
+    allowed = TripletRecord.__dataclass_fields__.keys()
+    return TripletRecord(**{key: value for key, value in row.items() if key in allowed})
 
 
 def as_torch_dataset(records: list[TripletRecord], *, seed: int | None = None):

@@ -47,6 +47,36 @@ Generate neutral drafts for triplet training:
   --model gpt-4.1-mini
 ```
 
+Generate harder style-regenerated negatives:
+
+```bash
+.venv/bin/python scripts/build_data_pipeline.py style-regen \
+  --passages data/processed/passages.jsonl \
+  --out data/processed/triplets_style_regen_small.jsonl \
+  --max-authors 8 \
+  --max-per-author 2 \
+  --source-chars 1200 \
+  --guide-examples 3 \
+  --guide-chars 900 \
+  --guide-tokens 450 \
+  --structure-tokens 180 \
+  --draft-tokens 260 \
+  --model gpt-4.1-mini
+```
+
+This creates:
+
+```text
+real_passage
+structure_summary
+style_guide
+style_regenerated_draft
+negative_type = style_regeneration
+```
+
+The embedder dataset automatically uses `style_regenerated_draft` as the
+negative when it exists.
+
 Print sampled triplets:
 
 ```bash
@@ -86,7 +116,7 @@ author_id, real_passage, neutral_draft
 ```text
 anchor   = real passage
 positive = different real passage by same author
-negative = neutral draft of anchor
+negative = style_regenerated_draft if present, otherwise neutral_draft
 ```
 
 The structure/style-guide/regeneration prompt code from the early notebooks now

@@ -13,6 +13,7 @@ from voice_clone.data.dataset import TripletTextDataset
 from voice_clone.data.pipeline import (
     build_neutral_triplets,
     build_passages,
+    build_style_regen_triplets,
     download_seed_corpus,
     summarize_passages_file,
 )
@@ -45,6 +46,24 @@ def main() -> None:
     neutral.add_argument("--max-per-author", type=int)
     neutral.add_argument("--seed", type=int, default=7)
     neutral.add_argument("--dry-run", action="store_true")
+
+    style_regen = subparsers.add_parser(
+        "style-regen",
+        help="Generate harder negatives using style guide + structure regeneration.",
+    )
+    style_regen.add_argument("--passages", default="data/processed/passages.jsonl")
+    style_regen.add_argument("--out", default="data/processed/triplets_style_regen.jsonl")
+    style_regen.add_argument("--model", default="gpt-4.1-mini")
+    style_regen.add_argument("--max-per-author", type=int, default=2)
+    style_regen.add_argument("--max-authors", type=int)
+    style_regen.add_argument("--seed", type=int, default=7)
+    style_regen.add_argument("--source-chars", type=int, default=1200)
+    style_regen.add_argument("--guide-examples", type=int, default=3)
+    style_regen.add_argument("--guide-chars", type=int, default=900)
+    style_regen.add_argument("--guide-tokens", type=int, default=450)
+    style_regen.add_argument("--structure-tokens", type=int, default=180)
+    style_regen.add_argument("--draft-tokens", type=int, default=260)
+    style_regen.add_argument("--dry-run", action="store_true")
 
     sample = subparsers.add_parser("sample", help="Print sampled anchor/positive/negative triplets.")
     sample.add_argument("--triplets", default="data/processed/triplets.jsonl")
@@ -84,6 +103,23 @@ def main() -> None:
             dry_run=args.dry_run,
         )
         print(json.dumps({"triplets": len(records), "output": args.out}, indent=2))
+    elif args.command == "style-regen":
+        records = build_style_regen_triplets(
+            args.passages,
+            args.out,
+            model=args.model,
+            max_per_author=args.max_per_author,
+            max_authors=args.max_authors,
+            seed=args.seed,
+            source_chars=args.source_chars,
+            guide_examples=args.guide_examples,
+            guide_chars=args.guide_chars,
+            guide_tokens=args.guide_tokens,
+            structure_tokens=args.structure_tokens,
+            draft_tokens=args.draft_tokens,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps({"triplets": len(records), "output": args.out}, indent=2))
     elif args.command == "sample":
         dataset = TripletTextDataset.from_jsonl(args.triplets, seed=args.seed)
         for index in range(min(args.count, len(dataset))):
@@ -94,6 +130,7 @@ def main() -> None:
             print(f"positive_id: {item['positive_id']}")
             print(f"anchor_doc_id: {item['anchor_doc_id']}")
             print(f"positive_doc_id: {item['positive_doc_id']}")
+            print(f"negative_type: {item['negative_type']}")
             print("\nANCHOR\n" + item["anchor"][: args.chars])
             print("\nPOSITIVE\n" + item["positive"][: args.chars])
             print("\nNEGATIVE\n" + item["negative"][: args.chars])

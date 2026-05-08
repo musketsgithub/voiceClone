@@ -12,6 +12,9 @@ from .gutenberg import download_gutenberg_corpus
 from .io import load_author_documents, read_jsonl, write_jsonl
 from .models import Passage, TripletRecord
 from .neutral_drafts import generate_neutral_draft
+from voice_clone.regeneration import regenerate_draft
+from voice_clone.structure import extract_structure
+from voice_clone.style_guide import generate_style_guide
 
 
 @dataclass(frozen=True)
@@ -128,10 +131,86 @@ def build_neutral_triplets(
     return records
 
 
+def build_style_regen_triplets(
+    passages_path: str | Path,
+    output_path: str | Path,
+    *,
+    model: str = "gpt-4.1-mini",
+    max_per_author: int = 2,
+    max_authors: int | None = None,
+    seed: int = 7,
+    source_chars: int = 1200,
+    guide_examples: int = 3,
+    guide_chars: int = 900,
+    guide_tokens: int = 450,
+    structure_tokens: int = 180,
+    draft_tokens: int = 260,
+    dry_run: bool = False,
+) -> list[TripletRecord]:
+    passages = load_passages(passages_path)
+    selected = select_balanced_passages(
+        passages,
+        max_per_author=max_per_author,
+        max_authors=max_authors,
+        seed=seed,
+    )
+    by_author: dict[str, list[Passage]] = defaultdict(list)
+    for passage in passages:
+        by_author[passage.author_id].append(passage)
+
+    style_guides: dict[str, str] = {}
+    records: list[TripletRecord] = []
+    for passage in selected:
+        if passage.author_id not in style_guides:
+            guide_source = by_author[passage.author_id][:guide_examples]
+            examples = [clip_text(p.text, guide_chars) for p in guide_source]
+            style_guides[passage.author_id] = (
+                dry_run_style_guide(passage.author_id)
+                if dry_run
+                else generate_style_guide(examples, model=model, max_tokens=guide_tokens)
+            )
+
+        source = clip_text(passage.text, source_chars)
+        structure_summary = (
+            dry_run_structure(passage.passage_id)
+            if dry_run
+            else extract_structure(source, model=model, max_tokens=structure_tokens)
+        )
+        regenerated = (
+            dry_run_regeneration(passage.passage_id, source)
+            if dry_run
+            else regenerate_draft(
+                structure_summary,
+                style_guides[passage.author_id],
+                model=model,
+                max_tokens=draft_tokens,
+            )
+        )
+
+        records.append(
+            TripletRecord(
+                passage_id=passage.passage_id,
+                author_id=passage.author_id,
+                real_passage=passage.text,
+                neutral_draft=regenerated,
+                doc_id=passage.doc_id,
+                token_count=passage.token_count,
+                structure_summary=structure_summary,
+                style_guide=style_guides[passage.author_id],
+                style_regenerated_draft=regenerated,
+                negative_type="style_regeneration",
+            )
+        )
+
+    write_jsonl(output_path, (record.to_dict() for record in records))
+    return records
+
+
 def select_balanced_passages(
     passages: list[Passage],
     *,
     max_per_author: int,
+    max_authors: int | None = None,
     seed: int = 7,
 ) -> list[Passage]:
     rng = random.Random(seed)
@@ -140,11 +219,31 @@ def select_balanced_passages(
         grouped[passage.author_id].append(passage)
 
     selected: list[Passage] = []
-    for author_id in sorted(grouped):
+    author_ids = sorted(grouped)
+    if max_authors is not None:
+        author_ids = author_ids[:max_authors]
+
+    for author_id in author_ids:
         author_passages = list(grouped[author_id])
         rng.shuffle(author_passages)
         selected.extend(author_passages[:max_per_author])
     return selected
+
+
+def clip_text(text: str, max_chars: int) -> str:
+    return " ".join(text[:max_chars].split())
+
+
+def dry_run_style_guide(author_id: str) -> str:
+    return f"DRY RUN style guide for {author_id}: preserve discourse flow and author-like pacing."
+
+
+def dry_run_structure(passage_id: str) -> str:
+    return f"DRY RUN structure summary for {passage_id}: preserve claim order and paragraph purpose."
+
+
+def dry_run_regeneration(passage_id: str, source: str) -> str:
+    return f"[DRY RUN style-regenerated draft placeholder for {passage_id}]\n\n{source}"
 
 
 def author_passage_index(records: list[TripletRecord]) -> dict[str, list[int]]:
