@@ -92,6 +92,7 @@ notebooks/04_embedder_forward_pass.ipynb
 notebooks/05_embedder_tiny_training.ipynb
 notebooks/06_author_style_embeddings.ipynb
 notebooks/07_style_llm_forward_pass.ipynb
+notebooks/08_style_llm_training.ipynb
 ```
 
 All model training should happen in notebooks. The package contains reusable

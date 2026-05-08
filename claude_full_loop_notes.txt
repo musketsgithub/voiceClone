@@ -1,0 +1,164 @@
+STYLE TRANSFER LOOP HANDOFF NOTES
+=================================
+
+Current artifacts
+-----------------
+- data/processed/passages.jsonl
+  Cleaned/chunked Gutenberg passages.
+
+- data/processed/triplets_style_regen_small.jsonl
+  Hard-negative embedder data. Each row includes:
+    real_passage
+    structure_summary
+    style_guide
+    style_regenerated_draft
+    negative_type = style_regeneration
+
+- checkpoints/style_embedder_stage3_best.pt
+  Trained passage-level style embedder checkpoint.
+
+- data/processed/author_style_embeddings.pt
+  Author-level 512d corpus embeddings produced by notebook 06.
+  These are attention-pooled over multiple passage embeddings per author.
+
+- checkpoints/style_llm_stage1.pt
+  To be produced by notebook 08. Contains only style projection adapter weights.
+
+
+Notebook order
+--------------
+1. 04_embedder_forward_pass.ipynb
+   Verifies LongFormer embedder forward pass.
+
+2. 05_embedder_tiny_training.ipynb
+   Trains passage embedder with triplet loss:
+     anchor   = real passage
+     positive = different real passage by same author
+     negative = style_regenerated_draft
+
+3. 06_author_style_embeddings.ipynb
+   Loads trained embedder.
+   Embeds multiple passages per author.
+   Uses CorpusStylePooler attention to produce one author embedding.
+
+4. 07_style_llm_forward_pass.ipynb
+   Loads author embeddings.
+   Injects style embedding into frozen causal LM.
+   Verifies logits change.
+
+5. 08_style_llm_training.ipynb
+   Trains only style_projection adapter:
+     prompt(style-regenerated draft) + author_embedding -> real_passage
+
+
+Important design constraint
+---------------------------
+All model training must stay in Jupyter notebooks.
+Package code may define reusable models/data helpers, but training loops belong
+in notebooks.
+
+
+Next loop to implement
+----------------------
+Goal:
+  style LLM output becomes hard negative for embedder, then embedder improves,
+  then author embeddings are refreshed, then style LLM trains again.
+
+Round N:
+
+1. Generate style model outputs
+   New notebook: 09_generate_style_llm_outputs.ipynb
+
+   Load:
+     checkpoints/style_llm_stage1.pt
+     data/processed/author_style_embeddings.pt
+     data/processed/triplets_style_regen_small.jsonl
+
+   For each row:
+     input draft = style_regenerated_draft or neutral_draft
+     style embedding = author_embeddings[author_id]
+     output = StyleConditionedCausalLM.generate(...)
+
+   Save:
+     data/processed/triplets_style_llm_round1.jsonl
+
+   Row should include:
+     real_passage
+     positive source fields
+     style_llm_output
+     negative_type = style_llm_output
+
+
+2. Retrain embedder with harder negatives
+   Update TripletTextDataset so if style_llm_output exists, negative priority is:
+     style_llm_output
+     style_regenerated_draft
+     neutral_draft
+
+   Run notebook 05 with:
+     TRIPLETS_PATH = data/processed/triplets_style_llm_round1.jsonl
+
+   Save:
+     checkpoints/style_embedder_round2_best.pt
+
+
+3. Refresh author embeddings
+   Run notebook 06 with:
+     CHECKPOINT_PATH = checkpoints/style_embedder_round2_best.pt
+
+   Save:
+     data/processed/author_style_embeddings_round2.pt
+
+
+4. Retrain Style LLM
+   Run notebook 08 with:
+     AUTHOR_EMBEDDINGS_PATH = data/processed/author_style_embeddings_round2.pt
+
+   Save:
+     checkpoints/style_llm_round2.pt
+
+
+5. Repeat
+   Each round should log:
+     embedder triplet loss
+     anchor-positive cosine
+     anchor-negative cosine
+     author retrieval accuracy
+     style LLM training loss
+     sample generated outputs
+
+
+Attention mechanism reminder
+----------------------------
+Do not represent an author using one passage.
+
+Correct path:
+  passage embedder produces many 512d passage embeddings
+  CorpusStylePooler attention-pools all selected author passage embeddings
+  resulting 512d author embedding conditions the Style LLM
+
+Future improvement:
+  Train CorpusStylePooler instead of leaving it randomly initialized.
+  Possible objective:
+    pooled author embedding should be close to held-out real passages from same
+    author and far from generated negatives / other authors.
+
+
+Known issues / warnings
+-----------------------
+- Current style LLM trains only style_projection. This is the cheapest adapter.
+  It may be too weak. Next upgrade is per-layer projections or LoRA adapters
+  plus style injection.
+
+- Current CorpusStylePooler attention is untrained. It still gives a learned
+  attention-shaped operation, but random attention is not ideal. Train it soon.
+
+- triplets_style_regen_small is tiny. Increase:
+    --max-per-author 5 or 10
+  once API budget allows.
+
+- Use Qwen/Qwen2.5-7B-Instruct for real Style LLM experiments.
+  Use distilgpt2 only for mechanics.
+
+- Save checkpoints atomically using tmp_path.replace(checkpoint_path) to avoid
+  corrupted .pt files.
