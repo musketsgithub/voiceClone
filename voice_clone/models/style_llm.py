@@ -52,6 +52,7 @@ class StyleConditionedCausalLM(nn.Module):
         torch_dtype=None,
         device_map=None,
         quantization_config=None,
+        attn_implementation=None,
         trust_remote_code: bool = True,
         token=None,
     ) -> "StyleConditionedCausalLM":
@@ -67,6 +68,8 @@ class StyleConditionedCausalLM(nn.Module):
             kwargs["device_map"] = device_map
         if quantization_config is not None:
             kwargs["quantization_config"] = quantization_config
+        if attn_implementation is not None:
+            kwargs["attn_implementation"] = attn_implementation
         if token is not None:
             kwargs["token"] = token
 
