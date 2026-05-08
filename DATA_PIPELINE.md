@@ -63,7 +63,8 @@ notebooks/05_embedder_tiny_training.ipynb
 ```
 
 All model training should happen in notebooks. The package contains reusable
-model/data code, but the training loop starts in `05_embedder_tiny_training.ipynb`.
+model/data code, but the embedder training loop lives in
+`05_embedder_tiny_training.ipynb`.
 
 Use `--dry-run` while testing the pipeline without spending API calls:
 

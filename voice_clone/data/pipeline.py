@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+import random
 
 from .chunking import chunk_document
 from .gutenberg import download_gutenberg_corpus
@@ -95,9 +96,13 @@ def build_neutral_triplets(
     *,
     model: str = "gpt-4.1-mini",
     limit: int | None = None,
+    max_per_author: int | None = None,
+    seed: int = 7,
     dry_run: bool = False,
 ) -> list[TripletRecord]:
     passages = load_passages(passages_path)
+    if max_per_author is not None:
+        passages = select_balanced_passages(passages, max_per_author=max_per_author, seed=seed)
     if limit is not None:
         passages = passages[:limit]
 
@@ -121,6 +126,25 @@ def build_neutral_triplets(
 
     write_jsonl(output_path, (record.to_dict() for record in records))
     return records
+
+
+def select_balanced_passages(
+    passages: list[Passage],
+    *,
+    max_per_author: int,
+    seed: int = 7,
+) -> list[Passage]:
+    rng = random.Random(seed)
+    grouped: dict[str, list[Passage]] = defaultdict(list)
+    for passage in passages:
+        grouped[passage.author_id].append(passage)
+
+    selected: list[Passage] = []
+    for author_id in sorted(grouped):
+        author_passages = list(grouped[author_id])
+        rng.shuffle(author_passages)
+        selected.extend(author_passages[:max_per_author])
+    return selected
 
 
 def author_passage_index(records: list[TripletRecord]) -> dict[str, list[int]]:

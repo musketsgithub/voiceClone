@@ -2,6 +2,8 @@ from voice_clone.data.chunking import chunk_text, is_probably_front_matter, roug
 from voice_clone.data.dataset import TripletTextDataset
 from voice_clone.data.gutenberg import SMOKE_GUTENBERG_BOOKS, select_books, slugify
 from voice_clone.data.models import TripletRecord
+from voice_clone.data.pipeline import select_balanced_passages
+from voice_clone.data.models import Passage
 
 
 def test_chunk_text_keeps_paragraphs_and_counts_tokens():
@@ -44,3 +46,17 @@ def test_front_matter_filter_detects_contents_chunk():
     text = "CONTENTS\n\n" + "\n".join(f"CHAPTER {i}" for i in range(10))
 
     assert is_probably_front_matter(text)
+
+
+def test_select_balanced_passages_limits_each_author():
+    passages = [
+        Passage(f"{author}:doc:{i}", author, "doc", "text", 1, i)
+        for author in ["a", "b"]
+        for i in range(5)
+    ]
+
+    selected = select_balanced_passages(passages, max_per_author=2, seed=7)
+
+    assert len(selected) == 4
+    assert sum(p.author_id == "a" for p in selected) == 2
+    assert sum(p.author_id == "b" for p in selected) == 2

@@ -35,9 +35,9 @@ class AttentionPool(nn.Module):
 class StyleEmbedder(nn.Module):
     """Encoder + attention pooling + 512d normalized projection.
 
-    This is the Stage 2 smoke implementation. It uses learned attention over
-    token embeddings first; sentence/paragraph grouping can be layered on once
-    the basic data/model loop is verified.
+    This implementation uses learned attention over token embeddings first.
+    Sentence/paragraph grouping can be layered on once the basic data/model
+    loop is verified.
     """
 
     def __init__(self, encoder, hidden_size: int, projection_dim: int = 512) -> None:
@@ -56,6 +56,7 @@ class StyleEmbedder(nn.Module):
         model_name: str = "allenai/longformer-base-4096",
         *,
         projection_dim: int = 512,
+        gradient_checkpointing: bool = False,
     ) -> "StyleEmbedder":
         try:
             from transformers import AutoModel
@@ -63,6 +64,8 @@ class StyleEmbedder(nn.Module):
             raise RuntimeError("Install `transformers` to load pretrained encoders.") from exc
 
         encoder = AutoModel.from_pretrained(model_name)
+        if gradient_checkpointing and hasattr(encoder, "gradient_checkpointing_enable"):
+            encoder.gradient_checkpointing_enable()
         return cls(
             encoder=encoder,
             hidden_size=encoder.config.hidden_size,

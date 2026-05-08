@@ -42,6 +42,8 @@ def main() -> None:
     neutral.add_argument("--out", default="data/processed/triplets.jsonl")
     neutral.add_argument("--model", default="gpt-4.1-mini")
     neutral.add_argument("--limit", type=int)
+    neutral.add_argument("--max-per-author", type=int)
+    neutral.add_argument("--seed", type=int, default=7)
     neutral.add_argument("--dry-run", action="store_true")
 
     sample = subparsers.add_parser("sample", help="Print sampled anchor/positive/negative triplets.")
@@ -77,6 +79,8 @@ def main() -> None:
             args.out,
             model=args.model,
             limit=args.limit,
+            max_per_author=args.max_per_author,
+            seed=args.seed,
             dry_run=args.dry_run,
         )
         print(json.dumps({"triplets": len(records), "output": args.out}, indent=2))
