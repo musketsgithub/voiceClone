@@ -52,29 +52,18 @@ class StyleConditionedCausalLM(nn.Module):
                 labels=labels,
             )
 
-        style_shift = self.style_projection(style_embedding)
-        layers = get_decoder_layers(self.base_model)
-        handles = []
-
-        def make_hook():
-            def hook(_module, inputs):
-                hidden_states = inputs[0]
-                shifted = hidden_states + style_shift[:, None, :].to(hidden_states.dtype)
-                return (shifted, *inputs[1:])
-
-            return hook
-
-        try:
-            for layer in layers:
-                handles.append(layer.register_forward_pre_hook(make_hook()))
-            return self.base_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
-        finally:
-            for handle in handles:
-                handle.remove()
+        # Inject style at the embedding level so style_shift sits directly in the
+        # computation graph. Hooks + gradient checkpointing conflict because hooks
+        # are removed before backward's recompute pass, making style_projection
+        # gradients zero.
+        style_shift = self.style_projection(style_embedding)  # (B, H)
+        embed = self.base_model.get_input_embeddings()
+        inputs_embeds = embed(input_ids) + style_shift[:, None, :].to(embed.weight.dtype)
+        return self.base_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
 
 
 def get_hidden_size(model) -> int:
@@ -86,18 +75,3 @@ def get_hidden_size(model) -> int:
     raise ValueError("Could not infer hidden size from model config.")
 
 
-def get_decoder_layers(model):
-    candidates = [
-        ("model", "layers"),
-        ("transformer", "h"),
-        ("gpt_neox", "layers"),
-    ]
-    for path in candidates:
-        current = model
-        for part in path:
-            current = getattr(current, part, None)
-            if current is None:
-                break
-        if current is not None:
-            return current
-    raise ValueError("Could not find decoder layers for style injection.")
