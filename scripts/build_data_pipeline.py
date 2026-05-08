@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from voice_clone.data.dataset import TripletTextDataset
 from voice_clone.data.pipeline import (
+    async_build_style_regen_triplets,
     build_neutral_triplets,
     build_passages,
     build_style_regen_triplets,
@@ -67,6 +69,25 @@ def main() -> None:
     style_regen.add_argument("--dry-run", action="store_true")
     style_regen.add_argument("--quiet", action="store_true")
 
+    style_regen_async = subparsers.add_parser(
+        "style-regen-async",
+        help="Generate style-regen triplets with concurrent API calls (fast).",
+    )
+    style_regen_async.add_argument("--passages", default="data/processed/passages.jsonl")
+    style_regen_async.add_argument("--out", default="data/processed/triplets_style_regen.jsonl")
+    style_regen_async.add_argument("--model", default="gpt-4.1-mini")
+    style_regen_async.add_argument("--max-per-author", type=int, default=200)
+    style_regen_async.add_argument("--max-authors", type=int)
+    style_regen_async.add_argument("--seed", type=int, default=7)
+    style_regen_async.add_argument("--source-chars", type=int, default=1200)
+    style_regen_async.add_argument("--guide-examples", type=int, default=3)
+    style_regen_async.add_argument("--guide-chars", type=int, default=900)
+    style_regen_async.add_argument("--guide-tokens", type=int, default=450)
+    style_regen_async.add_argument("--structure-tokens", type=int, default=180)
+    style_regen_async.add_argument("--draft-tokens", type=int, default=260)
+    style_regen_async.add_argument("--concurrency", type=int, default=20)
+    style_regen_async.add_argument("--dry-run", action="store_true")
+
     sample = subparsers.add_parser("sample", help="Print sampled anchor/positive/negative triplets.")
     sample.add_argument("--triplets", default="data/processed/triplets.jsonl")
     sample.add_argument("--count", type=int, default=3)
@@ -122,6 +143,26 @@ def main() -> None:
             draft_tokens=args.draft_tokens,
             dry_run=args.dry_run,
             verbose=not args.quiet,
+        )
+        print(json.dumps({"triplets": len(records), "output": args.out}, indent=2))
+    elif args.command == "style-regen-async":
+        records = asyncio.run(
+            async_build_style_regen_triplets(
+                args.passages,
+                args.out,
+                model=args.model,
+                max_per_author=args.max_per_author,
+                max_authors=args.max_authors,
+                seed=args.seed,
+                source_chars=args.source_chars,
+                guide_examples=args.guide_examples,
+                guide_chars=args.guide_chars,
+                guide_tokens=args.guide_tokens,
+                structure_tokens=args.structure_tokens,
+                draft_tokens=args.draft_tokens,
+                concurrency=args.concurrency,
+                dry_run=args.dry_run,
+            )
         )
         print(json.dumps({"triplets": len(records), "output": args.out}, indent=2))
     elif args.command == "sample":

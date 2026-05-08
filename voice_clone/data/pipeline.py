@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,9 +14,9 @@ from .gutenberg import download_gutenberg_corpus
 from .io import load_author_documents, read_jsonl, write_jsonl
 from .models import Passage, TripletRecord
 from .neutral_drafts import generate_neutral_draft
-from voice_clone.regeneration import regenerate_draft
-from voice_clone.structure import extract_structure
-from voice_clone.style_guide import generate_style_guide
+from voice_clone.regeneration import async_regenerate_draft, regenerate_draft
+from voice_clone.structure import async_extract_structure, extract_structure
+from voice_clone.style_guide import async_generate_style_guide, generate_style_guide
 
 
 @dataclass(frozen=True)
@@ -220,6 +222,117 @@ def build_style_regen_triplets(
     write_jsonl(output_path, (record.to_dict() for record in records))
     if verbose:
         print(f"[style-regen] wrote {len(records)} triplets to {output_path}", flush=True)
+    return records
+
+
+async def async_build_style_regen_triplets(
+    passages_path: str | Path,
+    output_path: str | Path,
+    *,
+    model: str = "gpt-4.1-mini",
+    max_per_author: int = 200,
+    max_authors: int | None = None,
+    seed: int = 7,
+    source_chars: int = 1200,
+    guide_examples: int = 3,
+    guide_chars: int = 900,
+    guide_tokens: int = 450,
+    structure_tokens: int = 180,
+    draft_tokens: int = 260,
+    concurrency: int = 20,
+    dry_run: bool = False,
+) -> list[TripletRecord]:
+    """Build style-regen triplets with concurrent API calls and incremental writes.
+
+    Each passage runs structure-extraction then draft-regeneration sequentially,
+    but multiple passages are processed in parallel up to `concurrency` simultaneous
+    API calls. Results are written to disk as they complete so a crash doesn't lose
+    progress.
+    """
+    passages = load_passages(passages_path)
+    selected = select_balanced_passages(
+        passages,
+        max_per_author=max_per_author,
+        max_authors=max_authors,
+        seed=seed,
+    )
+    by_author: dict[str, list[Passage]] = defaultdict(list)
+    for passage in passages:
+        by_author[passage.author_id].append(passage)
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build all style guides first (one per author, small number of calls).
+    author_ids = list({p.author_id for p in selected})
+    print(f"[async-style-regen] building {len(author_ids)} style guides ...", flush=True)
+    style_guides: dict[str, str] = {}
+    guide_sem = asyncio.Semaphore(min(len(author_ids), concurrency))
+
+    async def _build_guide(author_id: str) -> tuple[str, str]:
+        async with guide_sem:
+            source = by_author[author_id][:guide_examples]
+            examples = [clip_text(p.text, guide_chars) for p in source]
+            if dry_run:
+                return author_id, dry_run_style_guide(author_id)
+            guide = await async_generate_style_guide(examples, model=model, max_tokens=guide_tokens)
+            return author_id, guide
+
+    for author_id, guide in await asyncio.gather(*[_build_guide(a) for a in author_ids]):
+        style_guides[author_id] = guide
+        print(f"  style guide ready: {author_id}", flush=True)
+
+    # Process all passages concurrently, writing each record as it completes.
+    sem = asyncio.Semaphore(concurrency)
+    write_lock = asyncio.Lock()
+    records: list[TripletRecord] = []
+    completed = 0
+    total = len(selected)
+
+    async def _process(passage: Passage) -> TripletRecord:
+        nonlocal completed
+        source = clip_text(passage.text, source_chars)
+        async with sem:
+            structure = (
+                dry_run_structure(passage.passage_id)
+                if dry_run
+                else await async_extract_structure(source, model=model, max_tokens=structure_tokens)
+            )
+        async with sem:
+            draft = (
+                dry_run_regeneration(passage.passage_id, source)
+                if dry_run
+                else await async_regenerate_draft(
+                    structure,
+                    style_guides[passage.author_id],
+                    model=model,
+                    max_tokens=draft_tokens,
+                )
+            )
+        record = TripletRecord(
+            passage_id=passage.passage_id,
+            author_id=passage.author_id,
+            real_passage=passage.text,
+            neutral_draft=draft,
+            doc_id=passage.doc_id,
+            token_count=passage.token_count,
+            structure_summary=structure,
+            style_guide=style_guides[passage.author_id],
+            style_regenerated_draft=draft,
+            negative_type="style_regeneration",
+        )
+        async with write_lock:
+            completed += 1
+            with open(output_path, "a") as fh:
+                fh.write(json.dumps(record.to_dict()) + "\n")
+            print(f"  [{completed}/{total}] {passage.author_id} {passage.passage_id}", flush=True)
+        return record
+
+    # Truncate output file before starting (fresh run).
+    output_path.write_text("")
+    print(f"[async-style-regen] processing {total} passages (concurrency={concurrency}) ...", flush=True)
+    records = list(await asyncio.gather(*[_process(p) for p in selected]))
+    print(f"[async-style-regen] done — wrote {len(records)} triplets to {output_path}", flush=True)
     return records
 
 
