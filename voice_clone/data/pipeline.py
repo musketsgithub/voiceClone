@@ -317,7 +317,6 @@ async def async_build_style_regen_triplets(
                     if dry_run
                     else await async_extract_structure(source, model=model, max_tokens=structure_tokens)
                 )
-            async with sem:
                 draft = (
                     dry_run_regeneration(passage.passage_id, source)
                     if dry_run
