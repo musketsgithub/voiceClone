@@ -1,0 +1,354 @@
+STYLE TRANSFER AI — FULL ARCHITECTURE SPEC
+===========================================
+
+
+OVERVIEW
+--------
+A system that learns a person's writing style from their corpus and transfers
+that style onto AI-generated content. The user prompts the system, a large API
+model generates a neutral high-quality draft, and a style model rewrites it to
+sound like the specific person.
+
+The system has three learned components:
+  1. Style Embedder — encodes a person's style as a vector
+  2. Style LLM — rewrites neutral text using that vector
+  3. Discriminator — judges whether output matches real writing (used in training only)
+
+At inference, only the Embedder and Style LLM are used. The discriminator is
+training infrastructure only.
+
+
+---
+
+
+COMPONENT 1: STYLE EMBEDDER
+----------------------------
+
+Purpose:
+  Takes a passage of someone's writing and produces a dense vector (the "style
+  embedding") that captures how they write — not what they write about.
+
+Base model:
+  Start from LongFormer (allenai/longformer-base-4096). Long context is critical
+  because style lives at the document level, not the sentence level. Standard
+  BERT-size encoders miss too much.
+
+Architecture:
+  - Input: long passage (1000–2000 tokens ideally)
+  - LongFormer encoder processes full passage
+  - Hierarchical pooling:
+      token embeddings → sentence vectors (mean pool per sentence)
+      sentence vectors → paragraph vectors (attention pool)
+      paragraph vectors → document vector (attention pool)
+  - Linear projection head → 512d style embedding
+  - L2 normalize output
+
+  Hierarchical pooling matters because style operates at every scale
+  simultaneously. A single CLS token is dominated by early tokens and
+  misses paragraph-level and document-level patterns.
+
+Training objective:
+  Triplet contrastive loss:
+    anchor   = real passage by Person A
+    positive = different real passage by Person A (different topic)
+    negative = neutral AI rewrite of Person A's anchor passage
+
+  Loss = max(0, distance(anchor, positive) - distance(anchor, negative) + margin)
+
+  The negative being a neutral rewrite of the same content is critical.
+  It forces the embedder to learn style exclusively — topic is identical
+  on both sides, so the embedder cannot use topic as a discriminating feature.
+  This largely eliminates the content entanglement problem without needing
+  gradient reversal tricks.
+
+Auxiliary losses:
+  Reconstruction loss — force the embedding to retain all signal, not just
+  the easiest discriminative features. A small decoder tries to reconstruct
+  the original passage from the embedding. If it can't, signal is being lost.
+
+  Loss = reconstruction_quality (run alongside triplet loss, weighted sum)
+
+Hard negative strategy:
+  Round 1: neutral AI rewrites (as above) — easy negatives
+  Round 2: "write in the style of Person A" prompted output — medium negatives
+  Round 3: best output from current Style LLM — hard negatives
+
+  Each round removes the signal the embedder already found, forcing it
+  to go deeper. Run rounds in sequence as training progresses.
+
+What the embedder is actually learning:
+  The delta between neutral/AI writing and Person A's writing. It is a
+  directional representation — not "here is Person A's style described"
+  but "here is the transformation required to get from baseline to Person A."
+  This framing maps cleanly to how the Style LLM uses the embedding.
+
+Evaluation metrics:
+  - Author identification accuracy: given an embedding, retrieve the correct
+    author from a held-out pool. Target: >90% top-5 accuracy
+  - Real vs. neutral discrimination AUC. Target: >95%
+  - Topic invariance: same author different topics should have small distance;
+    different authors same topic should have large distance. Measure ratio.
+  - Generalization to unseen authors: hold out 20% of authors entirely during
+    training. Test on those. This is the real production performance estimate.
+
+
+---
+
+
+COMPONENT 2: STYLE LLM
+-----------------------
+
+Purpose:
+  Takes a neutral draft and a style embedding and rewrites the draft to sound
+  like the person the embedding represents. It is a style transfer model, not
+  a generative model. Content and ideas come from the big API model. This model
+  only changes how things are said.
+
+Base model:
+  Small open source LLM — Mistral 7B, Phi-3, or Llama 3.1 8B.
+  Smaller is better here. The task is focused and the quality floor is
+  provided by the big API model upstream.
+
+Injection mechanism:
+  The style embedding is injected into the LLM's residual stream at every
+  transformer layer via cross-attention adapters:
+
+    For each transformer layer:
+      hidden_state = transformer_block(hidden_state)
+      hidden_state = hidden_state + project(style_embedding)
+
+  The projection matrix is learned during training. It learns how much and
+  where to apply the style shift per layer. Early layers likely shift surface
+  features like punctuation and sentence length. Later layers likely shift
+  deeper features like argument structure and rhetorical rhythm. The model
+  discovers this automatically.
+
+  Only the injection/adapter weights are trained. The base LLM weights are
+  frozen. This keeps training tractable and prevents catastrophic forgetting.
+
+Training data:
+  Triplets:
+    (neutral draft of Person A's text, Person A's style embedding, Person A's real text)
+
+  Neutral drafts are generated by prompting a big API model:
+    "Rewrite this passage in neutral, clear prose. Preserve all meaning and
+     structure but remove any idiosyncratic style."
+
+  Prompts for training are reverse-engineered from real text:
+    Feed real text to big API model → "What prompt would produce this content?"
+    Noisy but workable at scale.
+
+Training objective:
+  Standard next-token prediction loss on Person A's real text, given the
+  neutral draft and style embedding as input. The model learns to follow
+  style embeddings as a general skill across thousands of authors.
+
+What the model learns:
+  Not any specific person's style. The general skill of "given a style
+  embedding, shift my generation in the direction that embedding indicates."
+  Each person's style lives entirely in their stored embedding vector.
+  The model weights are shared across all users.
+
+
+---
+
+
+COMPONENT 3: DISCRIMINATOR (TRAINING ONLY)
+-------------------------------------------
+
+Purpose:
+  Judges whether Style LLM output is indistinguishable from real Person A
+  writing. Provides adversarial reward signal to the Style LLM.
+
+Architecture:
+  The Embedder itself serves as the discriminator. It already knows how to
+  measure distance between real writing and AI imitation — that's exactly
+  what it was trained to do.
+
+  Discriminator score = distance between Style LLM output embedding
+                        and Person A's real writing embedding cluster
+
+  If distance is small → Style LLM output is close to real writing → positive reward
+  If distance is large → Style LLM output is far from real writing → negative reward
+
+Adversarial training loop:
+  1. Big API model generates neutral draft
+  2. Style LLM transforms it using Person A's embedding
+  3. Embedder scores the output: how close to real Person A writing?
+  4. Style LLM gets positive reward if score is high, negative if low
+  5. Embedder simultaneously gets rewarded for correct discrimination
+  6. Both improve. Each makes the other harder to fool.
+
+Mode collapse prevention:
+  Mode collapse = Style LLM finds one transformation that fools the embedder
+  and repeats it forever. Prevent by:
+  - Enforcing topic diversity across training batches
+  - Penalizing output similarity across different generations
+  - Keeping neutral draft as anchor — heavy penalty if Style LLM drifts
+    too far from the source meaning
+
+
+---
+
+
+DATA PIPELINE
+-------------
+
+Corpus sources:
+  - Project Gutenberg — long-form authored text, clean, many authors
+  - Common Crawl filtered by author — blogs, essays, informal writing
+  - Substack archives — newsletters, modern voice, high style variance
+  - Academic papers by author — formal register
+  - Twitter/X archives — short-form, extremely varied style
+
+  Prioritize author diversity over volume. 10,000 authors with 5 documents
+  each beats 100 authors with 500 documents each. The embedding space needs
+  broad coverage to generalize to new users.
+
+Data preparation steps:
+  1. Collect and tag everything by author
+  2. Clean — remove low quality, non-native, or mixed-author text
+  3. Chunk into 1000–2000 token passages
+  4. Enforce topic diversity when sampling pairs from same author
+     (anchor and positive should be on different topics)
+  5. Generate neutral drafts for every real passage using big API model
+     — these serve as negatives for embedder training AND inputs for
+       Style LLM training. One generation step serves both purposes.
+  6. Build triplets automatically from the above
+
+Corpus size requirements per user at inference:
+  < 1,000 words    → surface style only (vocabulary, punctuation)
+  5,000–20,000     → sentence and paragraph patterns
+  50,000+          → deep rhetorical and structural style
+  200,000+         → worldview, argument structure, idiosyncrasy
+
+  For sparse users, lean on the embedding's generalization rather than
+  expecting deep personalization. Be honest about this in the product.
+
+
+---
+
+
+FULL TRAINING SEQUENCE
+----------------------
+
+Phase 1 — Train Embedder Round 1
+  - Build triplets: (real passage, different real passage, neutral draft)
+  - Train with triplet loss + reconstruction auxiliary loss
+  - Evaluate: author ID accuracy, real vs neutral AUC, topic invariance
+  - Target: >90% author ID, >95% AUC before moving on
+
+Phase 2 — Train Style LLM Round 1
+  - Freeze embedder
+  - Generate style embeddings for all authors in corpus
+  - Auto-generate prompts from real text
+  - Train injection weights on (neutral draft + style embedding) → real text
+  - Evaluate: does output move toward real passage? meaning preserved?
+  - Human eval: does it sound more like the person?
+
+Phase 3 — Generate Hard Negatives
+  - Run all neutral drafts through current Style LLM with each author's embedding
+  - These are now harder negatives than round 1 — the Style LLM is already
+    imitating style to some degree
+  - Store alongside easy negatives
+
+Phase 4 — Retrain Embedder with Hard Negatives
+  - Unfreeze embedder
+  - Retrain with full triplet set (easy + medium + hard negatives)
+  - Embedder must now discriminate against much better imitations
+  - Forces it to find deeper signal it previously ignored
+
+Phase 5 — Adversarial Loop
+  - Freeze embedder
+  - Style LLM generates output → embedder scores it → Style LLM gets reward signal
+  - Embedder gets rewarded for correct discrimination
+  - Monitor for mode collapse throughout
+  - Continue until both models plateau
+
+Phase 6 — Final Evaluation
+  - Test on completely held-out authors (seen zero times during training)
+  - Human eval from people who know the writer personally
+  - This is your real world performance estimate
+
+Repeat phases 3–5 as needed until human eval scores plateau.
+
+
+---
+
+
+INFERENCE PIPELINE
+------------------
+
+Onboarding a new user:
+  1. User uploads writing corpus
+  2. Embedder runs once on corpus → produces style embedding vector
+  3. Vector stored in database (just an array of 512 floats per user)
+
+Handling a user request:
+  1. User types prompt
+  2. Big API model (GPT-4, Claude, etc.) generates neutral high-quality draft
+  3. Style LLM transforms draft using user's stored style embedding
+  4. Output returned to user
+
+Feedback loop:
+  - Thumbs up/down on every output
+  - Negative feedback flags that (neutral draft, output, embedding) triplet
+  - Periodically retrain on flagged examples
+  - Style embeddings can be refined over time as user adds more writing
+
+Scalability:
+  Every user is just a stored vector. No per-user fine-tuning. No adapter
+  swapping. The model weights are identical for all users. Scales to millions
+  of users with trivial storage overhead.
+
+
+---
+
+
+KEY RISKS
+---------
+
+1. Style vector may not be fully linear — the transformation from AI to
+   Person A may require different shifts in different contexts. A single
+   fixed vector applied uniformly is an approximation.
+
+2. LLM priors are strong — the base LLM has strong gravity toward average
+   fluent English. The style shift competes against billions of parameters.
+   Surface style is easier to shift than deep structure.
+
+3. Content entanglement — embedder may partially encode topic despite the
+   neutral draft negative strategy. Monitor topic invariance metric closely.
+
+4. Corpus quality — most users' writing will be inconsistent across time
+   and context. Emails sound nothing like blog posts. Consider per-register
+   embeddings for power users.
+
+5. Evaluation is subjective — a model that fools your discriminator may
+   still be obviously off to humans who know the writer. Invest heavily in
+   human eval from the start.
+
+6. Mode collapse in adversarial training — monitor output diversity closely.
+
+
+---
+
+
+TECH STACK
+----------
+
+Training:
+  PyTorch
+  HuggingFace Transformers (base models)
+  HuggingFace Datasets (corpus handling)
+  PEFT library (adapter/injection layers)
+  Weights & Biases (experiment tracking — log everything)
+
+Models:
+  Embedder base: allenai/longformer-base-4096
+  Style LLM base: mistralai/Mistral-7B or microsoft/Phi-3-mini
+  Big API model: Claude or GPT-4 via API (neutral draft generation)
+
+Infrastructure:
+  Vector DB for style embeddings (Pinecone, Weaviate, or pgvector)
+  GPU cluster for training (A100s ideally)
+  Standard web backend for product UI

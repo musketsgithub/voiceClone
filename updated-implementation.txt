@@ -1,0 +1,276 @@
+STYLE TRANSFER AI — SIMPLIFIED FINAL PIPELINE
+=============================================
+
+
+OVERVIEW
+--------
+Goal:
+Generate AI-written text that preserves the user’s meaning/content while
+sounding structurally and stylistically like a specific person.
+
+The system is hierarchical:
+  - Frontier model handles semantics + discourse generation
+  - Symbolic style guide handles high-level style tendencies
+  - Small Style LLM handles fine-grained stylistic refinement
+  - Style Embedder evaluates and improves stylistic realism over time
+
+
+=========================================================
+COMPONENTS
+=========================================================
+
+1. STYLE GUIDE (SYMBOLIC)
+-------------------------
+Generated from the user’s corpus.
+
+Captures:
+  - discourse structure tendencies
+  - argument flow habits
+  - pacing
+  - rhetorical patterns
+  - paragraph dynamics
+  - sentence tendencies
+
+Examples:
+  - introduces counterarguments early
+  - prefers gradual escalation
+  - uses recursive caveats
+  - alternates dense analysis with short conclusions
+  - favors contrastive framing
+
+Important:
+The style guide should describe generation behavior, NOT aesthetic labels.
+
+
+2. STYLE EMBEDDER (LATENT)
+---------------------------
+Encodes subtle stylistic patterns difficult to describe symbolically.
+
+Captures:
+  - micro-rhythm
+  - lexical tendencies
+  - cadence
+  - local stylistic fingerprints
+  - deeper residual voice patterns
+
+Architecture:
+  Passage encoder + attention-based corpus aggregation + projection head.
+
+Pipeline:
+  1. Split author corpus into passages/chunks
+  2. Encode each passage independently
+  3. Apply learned attention pooling across passages
+  4. Produce unified corpus-level style embedding
+
+The attention pooling layer learns:
+  - which passages contain strong stylistic signal
+  - which passages are generic/noisy
+  - which recurring traits persist across the corpus
+
+This allows the model to preserve:
+  - sparse recurring phrases
+  - intermittent rhetorical habits
+  - repeated discourse patterns
+  - long-range stylistic invariants
+
+without washing them out through simple averaging.
+
+Purpose:
+  - style conditioning
+  - evaluation
+  - hard-negative training
+  - similarity scoring
+
+Explicit Style Statistics:
+  In addition to latent embeddings, the system may track:
+    - recurring phrase usage
+    - punctuation distributions
+    - transition frequencies
+    - sentence length distributions
+    - syntactic tendencies
+    - recurring rhetorical constructions
+
+These explicit corpus-level statistics complement the latent embedding
+and help preserve sparse stylistic traits that may not survive neural
+compression alone.
+
+3. STRUCTURE EXTRACTOR
+-----------------------
+Transforms real passages into discourse-level representations.
+
+Preserves:
+  - reasoning order
+  - paragraph purpose
+  - causal flow
+  - emphasis structure
+  - conceptual progression
+
+Removes:
+  - wording
+  - syntax
+  - cadence
+  - rhetorical phrasing
+
+Output example:
+  - introduce misconception
+  - present contradiction
+  - explain causal mechanism
+  - broaden implication
+
+Goal:
+Preserve semantic/discourse skeleton without preserving realization.
+
+
+4. FRONTIER MODEL GENERATOR
+----------------------------
+Uses:
+  - discourse structure
+  - semantic content
+  - symbolic style guide
+
+to generate:
+  - structurally aligned
+  - partially stylized drafts
+
+Important:
+This is NOT fully neutral text.
+The draft should already contain:
+  - high-level rhetorical flow
+  - discourse pacing
+  - structural style tendencies
+
+But it should NOT fully reproduce:
+  - local phrasing
+  - cadence
+  - fine-grained stylistic fingerprints
+
+
+5. STYLE LLM (REFINEMENT MODEL)
+--------------------------------
+Small finetuned model.
+
+Input:
+  - partially stylized draft
+  - corpus-level latent style embedding
+  - optional explicit style statistics
+
+Output:
+  - refined final passage
+
+Responsibilities:
+  - local stylistic realization
+  - cadence refinement
+  - sentence-level voice
+  - lexical adjustment
+  - punctuation/style consistency
+
+Important:
+The Style LLM is NOT responsible for:
+  - discourse planning
+  - argument invention
+  - semantic generation
+
+
+=========================================================
+TRAINING PIPELINE
+=========================================================
+
+PHASE 1 — DATA GENERATION
+--------------------------
+For each real author passage:
+
+1. Generate style guide from author corpus
+2. Extract discourse structure from passage
+3. Regenerate passage using:
+     structure + style guide
+4. Store:
+     (real passage,
+      partially stylized draft,
+      style embedding)
+
+
+PHASE 2 — TRAIN EMBEDDER (EASY NEGATIVES)
+-------------------------------------------
+Train contrastively using:
+  - real passages
+  - generic regenerations
+  - paraphrases
+  - weak style imitations
+
+Goal:
+Learn coarse style discrimination while minimizing topic leakage.
+
+
+PHASE 3 — TRAIN STYLE LLM
+---------------------------
+Train:
+  partially stylized draft + style embedding
+      ->
+  real author text
+
+Loss:
+  standard next-token prediction loss.
+
+
+PHASE 4 — HARD NEGATIVE GENERATION
+-----------------------------------
+Run Style LLM outputs through the embedder.
+
+Use generated outputs as new negatives.
+
+These negatives are now:
+  - structurally realistic
+  - stylistically stronger
+  - much harder to distinguish
+
+
+PHASE 5 — RETRAIN EMBEDDER
+----------------------------
+Retrain embedder against:
+  - easy negatives
+  - Style LLM outputs
+  - prompted imitations
+  - diverse synthetic generations
+
+Goal:
+Prevent shortcut learning and force deeper stylistic discrimination.
+
+
+PHASE 6 — ITERATE
+------------------
+Repeat:
+  generate harder negatives
+      ->
+  retrain embedder
+      ->
+  improve Style LLM
+
+No REINFORCE or online RL required.
+
+
+=========================================================
+INFERENCE PIPELINE
+=========================================================
+
+1. User uploads corpus
+2. Generate:
+     - symbolic style guide
+     - corpus-level latent style embedding
+     - optional explicit style statistics
+3. User submits prompt
+4. Frontier model generates:
+     structure-aware partially stylized draft
+5. Style LLM refines draft
+6. Return final output
+
+
+=========================================================
+CORE PRINCIPLES
+=========================================================
+
+1. Preserve discourse structure, not surface realization.
+2. Separate macro-style from micro-style.
+3. Match training distribution to inference distribution.
+4. Use progressively harder negatives to avoid shortcut learning.
+5. Keep frontier model responsible for semantics/planning.
+6. Keep Style LLM responsible for refinement, not full generation.

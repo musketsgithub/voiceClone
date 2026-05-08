@@ -1,0 +1,348 @@
+STYLE TRANSFER AI — IMPLEMENTATION STAGES & TESTING PLAN
+=========================================================
+Build and validate each stage in isolation before moving on.
+Each stage has a clear pass/fail criterion.
+Use Jupyter notebooks throughout — one notebook per stage.
+
+
+---
+
+
+STAGE 1: DATA PIPELINE
+Notebook: 01_data_pipeline.ipynb
+---------------------------------
+
+Goal:
+  Get data flowing end to end before touching any model code.
+  If you can't see clean batches, nothing else matters.
+
+Tasks:
+  1. Load a small authored corpus (start with 20 authors, 5 docs each)
+     Suggested source: Project Gutenberg top authors — easy to scrape and clean
+  2. Clean and chunk into 1000-token passages
+  3. Call big API model on each passage to generate neutral draft
+     Prompt: "Rewrite this passage in neutral clear prose. Preserve all
+              meaning and structure but remove any idiosyncratic style."
+  4. Store triplets: (author_id, real_passage, neutral_draft)
+  5. Build a PyTorch Dataset class that samples triplets for training
+     (anchor=real, positive=different real, negative=neutral draft)
+  6. Verify DataLoader outputs correct shapes and content
+
+Pass criteria:
+  - DataLoader runs without errors
+  - Print 3 random triplets and manually verify they look correct
+  - Anchor and positive are by same author, different topic
+  - Negative is the neutral rewrite of the anchor — same content, no style
+
+Notebook should output:
+  - Sample triplet visualized as readable text
+  - Dataset statistics: authors, passages per author, avg passage length
+  - Confirm topic diversity in anchor/positive pairs
+
+
+---
+
+
+STAGE 2: EMBEDDER — ARCHITECTURE & FORWARD PASS
+Notebook: 02_embedder_architecture.ipynb
+-----------------------------------------
+
+Goal:
+  Get the embedder architecture running and producing outputs of the right shape.
+  No training yet — just verify the forward pass works.
+
+Tasks:
+  1. Load LongFormer base (allenai/longformer-base-4096)
+  2. Add hierarchical pooling on top:
+       token embeddings → sentence vectors via mean pool
+       sentence vectors → paragraph vectors via attention pool
+       paragraph vectors → document vector via attention pool
+  3. Add linear projection head → 512d output
+  4. Add L2 normalization
+  5. Run a forward pass on a batch from Stage 1
+  6. Verify output shape: (batch_size, 512)
+  7. Verify L2 norm of each embedding ≈ 1.0
+
+Pass criteria:
+  - Forward pass runs without errors on CPU
+  - Output shape is correct
+  - Embeddings are L2 normalized
+  - No NaNs or infs in output
+
+Notebook should output:
+  - Model parameter count
+  - Output tensor shape
+  - Sample embedding norms (should all be ~1.0)
+
+
+---
+
+
+STAGE 3: EMBEDDER — TRAINING
+Notebook: 03_embedder_training.ipynb
+--------------------------------------
+
+Goal:
+  Train the embedder and verify it is actually learning to separate authors.
+  This is the most critical validation in the whole project.
+  If the embedder doesn't learn here, nothing downstream works.
+
+Tasks:
+  1. Implement triplet loss with configurable margin
+  2. Implement reconstruction auxiliary loss
+       small decoder: 512d embedding → reconstructed passage tokens
+       loss = cross entropy on reconstruction
+  3. Implement combined loss: triplet_loss + 0.1 * reconstruction_loss
+  4. Training loop with W&B logging
+  5. Evaluation function that runs every 100 steps:
+       - Author identification: embed 5 passages per author, query with 1,
+         check if top-1 retrieved is correct author
+       - Real vs neutral AUC: can embedder separate real from neutral drafts?
+  6. Train on small corpus first (20 authors) to verify learning signal
+  7. Scale to full corpus once verified
+
+Pass criteria (small corpus):
+  - Author ID accuracy > 80% by step 500 on 20-author corpus
+  - Real vs neutral AUC > 90% by step 500
+  - If neither is happening by step 500, something is wrong — stop and debug
+
+Pass criteria (full corpus):
+  - Author ID accuracy > 90% top-5
+  - Real vs neutral AUC > 95%
+  - Topic invariance ratio > 2.0 (between-author distance / within-author distance)
+  - Held-out author generalization within 10% of in-training performance
+
+Notebook should output:
+  - Loss curves (triplet + reconstruction + total)
+  - Author ID accuracy curve over training steps
+  - Real vs neutral AUC curve
+  - Example: show 3 authors' embeddings projected to 2D (PCA or UMAP)
+    — clusters should be visible
+  - Save best checkpoint
+
+
+---
+
+
+STAGE 4: STYLE LLM — INJECTION ARCHITECTURE
+Notebook: 04_style_llm_architecture.ipynb
+-------------------------------------------
+
+Goal:
+  Get the Style LLM architecture running with style embedding injection.
+  Verify that the injection mechanism is actually influencing token generation.
+
+Tasks:
+  1. Load base LLM (Mistral 7B or Phi-3-mini — start with Phi-3 for speed)
+  2. Freeze all base model weights
+  3. Add cross-attention adapter at each transformer layer:
+       hidden_state = transformer_block(hidden_state)
+       hidden_state = hidden_state + linear_projection(style_embedding)
+     The projection is learned; base weights are frozen
+  4. Run forward pass with:
+       input = neutral draft tokens
+       style_embedding = random 512d vector (just for shape testing)
+  5. Run same forward pass with zero vector as style embedding
+  6. Verify outputs differ — injection is having an effect
+  7. Count trainable parameters (should be only the adapter weights)
+
+Pass criteria:
+  - Forward pass runs without errors
+  - Output differs when style embedding changes — injection is working
+  - Trainable parameter count is small relative to total (< 5% of total params)
+  - No NaNs in output
+
+Notebook should output:
+  - Total vs trainable parameter count
+  - Output token probability distribution with random embedding vs zero embedding
+    — should be different, confirming injection is active
+
+
+---
+
+
+STAGE 5: STYLE LLM — TRAINING
+Notebook: 05_style_llm_training.ipynb
+---------------------------------------
+
+Goal:
+  Train the Style LLM injection weights.
+  Verify it is actually shifting style toward the target person.
+
+Tasks:
+  1. Load frozen base LLM with injection adapters from Stage 5
+  2. Load frozen embedder from Stage 3
+  3. Build training dataset:
+       for each (real_passage, neutral_draft, author_id) in corpus:
+         embedding = embedder(sample of author's other passages)
+         input = neutral_draft
+         target = real_passage
+  4. Training loop:
+       input: neutral draft tokens + style embedding injected at every layer
+       target: real passage tokens
+       loss: next-token prediction (cross entropy) on real passage
+  5. Evaluation every 100 steps:
+       Generate output for 5 authors
+       Human-readable check: does it sound more like them?
+       BLEU score vs real passage (imperfect but fast)
+       Embedder distance: is output embedding closer to real embedding?
+  6. Train until embedder distance plateaus
+
+Pass criteria:
+  - Embedder distance between output and real passage decreases over training
+  - Output is clearly different from neutral draft — style shift is happening
+  - Human eval: 3 out of 5 test outputs judged as closer to real author style
+    than neutral draft
+
+Notebook should output:
+  - Loss curve
+  - Embedder distance curve (output vs real, should decrease)
+  - Side by side: neutral draft | Style LLM output | real passage
+    for 3 authors — let you eyeball whether it's working
+  - Save best checkpoint
+
+
+---
+
+
+STAGE 6: ADVERSARIAL LOOP
+Notebook: 06_adversarial_training.ipynb
+-----------------------------------------
+
+Goal:
+  Train embedder and Style LLM against each other.
+  Each should make the other stronger.
+
+Tasks:
+  1. Load trained embedder and Style LLM from previous stages
+  2. Generate hard negatives using current Style LLM:
+       run all neutral drafts through Style LLM with each author's embedding
+       these are now the hardest negatives
+  3. Retrain embedder on easy + hard negatives
+  4. Measure new discrimination AUC — should be harder (lower) initially
+  5. Retrain Style LLM with updated embedder as discriminator:
+       reward = -distance(output_embedding, real_embedding_cluster)
+       use REINFORCE or similar to backprop reward through generation
+  6. Monitor for mode collapse:
+       measure output diversity across different prompts for same author
+       if diversity drops, mode collapse is starting
+  7. Iterate until both models plateau
+
+Pass criteria:
+  - Each round of adversarial training improves human eval scores
+  - Embedder AUC stays high even as Style LLM improves
+  - Output diversity remains high (no mode collapse)
+  - Embedder distance on held-out authors continues to decrease
+
+Notebook should output:
+  - AUC curve across adversarial rounds
+  - Embedder distance curve across adversarial rounds
+  - Output diversity metric across rounds
+  - Human eval scores (run this manually — just read outputs and rate them)
+
+
+---
+
+
+STAGE 7: END TO END INFERENCE TEST
+Notebook: 07_inference_pipeline.ipynb
+---------------------------------------
+
+Goal:
+  Wire everything together and test the full production pipeline
+  on completely new users not seen during training.
+
+Tasks:
+  1. Load final embedder and Style LLM checkpoints
+  2. Pick 5 people not in training corpus — use their real writing as corpus
+  3. For each person:
+       a. Run embedder on their corpus → style embedding
+       b. Give a prompt to big API model → neutral draft
+       c. Run Style LLM with their embedding → styled output
+       d. Compare: neutral draft vs styled output vs real sample from that person
+  4. Human evaluation:
+       show a friend who knows the person: "which sounds more like them?"
+       this is your ground truth
+  5. Measure:
+       embedder distance: output vs real corpus
+       topic preservation: does output still say what the neutral draft said?
+
+Pass criteria:
+  - Styled output is judged closer to real writing than neutral draft in >60% of cases
+  - Topic preservation: styled output conveys same information as neutral draft
+  - No catastrophic failures (gibberish, repetition, total style mismatch)
+
+Notebook should output:
+  - Side by side comparison for each test user
+  - Human eval results table
+  - Embedder distance scores
+  - Notes on failure cases and why they failed
+
+
+---
+
+
+STAGE 8: PRODUCTIONIZE
+Notebook: 08_productionize.ipynb
+----------------------------------
+
+Goal:
+  Make the inference pipeline fast and cheap enough for a real product.
+
+Tasks:
+  1. Benchmark inference latency end to end
+       embedder forward pass: should be < 1s
+       big API model: depends on provider
+       Style LLM: measure tokens/sec
+  2. Quantize Style LLM to 4-bit (bitsandbytes or GGUF)
+       rerun inference tests — does quality drop significantly?
+  3. Cache style embeddings in vector DB (pgvector is simplest to start)
+  4. Build simple API wrapper:
+       POST /generate { user_id, prompt }
+       returns styled output
+  5. Load test: 10 concurrent requests, measure latency and GPU memory
+
+Pass criteria:
+  - End to end latency < 5 seconds for average request
+  - 4-bit quantization does not degrade human eval scores significantly
+  - API handles 10 concurrent requests without OOM errors
+
+Notebook should output:
+  - Latency benchmarks at each pipeline step
+  - Memory usage before and after quantization
+  - Quality comparison: full precision vs quantized
+
+
+---
+
+
+ROUGH TIMELINE
+--------------
+
+Stage 1 (data pipeline):         1–2 days
+Stage 2 (embedder architecture): 1 day
+Stage 3 (embedder training):     3–5 days (most of the time is training runs)
+Stage 4 (style LLM architecture):1 day
+Stage 5 (style LLM training):    3–5 days
+Stage 6 (adversarial loop):      3–5 days
+Stage 7 (inference test):        1–2 days
+Stage 8 (productionize):         2–3 days
+
+Total: roughly 3–4 weeks of focused work assuming GPU access.
+The biggest unknowns are stages 3 and 6 — if the learning signal is weak,
+debugging takes time.
+
+
+---
+
+
+HARD RULES FOR ALL NOTEBOOKS
+------------------------------
+
+1. Get data flowing before writing model code. Always.
+2. Print tensor shapes at every step until you trust the pipeline.
+3. Run on 20 authors before scaling to full corpus.
+4. Log everything to Weights & Biases from stage 3 onward.
+5. Save checkpoints aggressively — training is expensive to repeat.
+6. Each notebook should be runnable top to bottom independently.
+7. Never move to the next stage without passing the current stage's criteria.
