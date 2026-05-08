@@ -9,16 +9,34 @@ torch, nn, F = _require_torch()
 
 
 class StyleConditionedCausalLM(nn.Module):
-    """Freeze a base CausalLM and inject a style vector into decoder layers."""
+    """Freeze a base CausalLM and inject a style vector into every decoder layer."""
 
     def __init__(self, base_model, style_dim: int = 512) -> None:
         super().__init__()
         self.base_model = base_model
         hidden_size = get_hidden_size(base_model)
         self.style_projection = nn.Linear(style_dim, hidden_size)
+        # Zero-init so the model starts at baseline loss rather than disrupted.
+        nn.init.zeros_(self.style_projection.weight)
+        nn.init.zeros_(self.style_projection.bias)
+
+        self._style_shift = None  # set per forward call, read by hooks during recompute
 
         for parameter in self.base_model.parameters():
             parameter.requires_grad = False
+
+        # Persistent hooks: registered once, never removed, so gradient-checkpointing
+        # recompute passes also fire them (unlike temporary hooks that are torn down
+        # in a finally block before backward runs).
+        for layer in get_decoder_layers(self.base_model):
+            layer.register_forward_pre_hook(self._inject_style)
+
+    def _inject_style(self, _module, inputs):
+        if self._style_shift is None:
+            return
+        hidden_states = inputs[0]
+        shifted = hidden_states + self._style_shift[:, None, :].to(hidden_states.dtype)
+        return (shifted, *inputs[1:])
 
     @classmethod
     def from_pretrained(
@@ -45,22 +63,14 @@ class StyleConditionedCausalLM(nn.Module):
         return cls(base_model, style_dim=style_dim)
 
     def forward(self, input_ids, attention_mask=None, style_embedding=None, labels=None):
-        if style_embedding is None:
-            return self.base_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
-
-        # Inject style at the embedding level so style_shift sits directly in the
-        # computation graph. Hooks + gradient checkpointing conflict because hooks
-        # are removed before backward's recompute pass, making style_projection
-        # gradients zero.
-        style_shift = self.style_projection(style_embedding)  # (B, H)
-        embed = self.base_model.get_input_embeddings()
-        inputs_embeds = embed(input_ids) + style_shift[:, None, :].to(embed.weight.dtype)
+        # Set before calling base_model so hooks read the current shift.
+        # Not cleared after: the recompute pass during backward fires hooks while
+        # loss.backward() is still running, so _style_shift must still be set then.
+        self._style_shift = (
+            self.style_projection(style_embedding) if style_embedding is not None else None
+        )
         return self.base_model(
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
         )
@@ -75,3 +85,18 @@ def get_hidden_size(model) -> int:
     raise ValueError("Could not infer hidden size from model config.")
 
 
+def get_decoder_layers(model):
+    candidates = [
+        ("model", "layers"),
+        ("transformer", "h"),
+        ("gpt_neox", "layers"),
+    ]
+    for path in candidates:
+        current = model
+        for part in path:
+            current = getattr(current, part, None)
+            if current is None:
+                break
+        if current is not None:
+            return current
+    raise ValueError("Could not find decoder layers for style injection.")
