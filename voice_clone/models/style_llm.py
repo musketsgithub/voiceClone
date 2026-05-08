@@ -51,6 +51,7 @@ class StyleConditionedCausalLM(nn.Module):
         style_dim: int = 512,
         torch_dtype=None,
         device_map=None,
+        quantization_config=None,
         trust_remote_code: bool = True,
     ) -> "StyleConditionedCausalLM":
         try:
@@ -63,6 +64,8 @@ class StyleConditionedCausalLM(nn.Module):
             kwargs["torch_dtype"] = torch_dtype
         if device_map is not None:
             kwargs["device_map"] = device_map
+        if quantization_config is not None:
+            kwargs["quantization_config"] = quantization_config
 
         base_model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
         return cls(base_model, style_dim=style_dim)
