@@ -305,26 +305,35 @@ async def async_build_style_regen_triplets(
     completed = 0
     start = time.monotonic()
 
-    async def _process(passage: Passage) -> TripletRecord:
+    failed: list[str] = []
+
+    async def _process(passage: Passage) -> TripletRecord | None:
         nonlocal completed
         source = clip_text(passage.text, source_chars)
-        async with sem:
-            structure = (
-                dry_run_structure(passage.passage_id)
-                if dry_run
-                else await async_extract_structure(source, model=model, max_tokens=structure_tokens)
-            )
-        async with sem:
-            draft = (
-                dry_run_regeneration(passage.passage_id, source)
-                if dry_run
-                else await async_regenerate_draft(
-                    structure,
-                    style_guides[passage.author_id],
-                    model=model,
-                    max_tokens=draft_tokens,
+        try:
+            async with sem:
+                structure = (
+                    dry_run_structure(passage.passage_id)
+                    if dry_run
+                    else await async_extract_structure(source, model=model, max_tokens=structure_tokens)
                 )
-            )
+            async with sem:
+                draft = (
+                    dry_run_regeneration(passage.passage_id, source)
+                    if dry_run
+                    else await async_regenerate_draft(
+                        structure,
+                        style_guides[passage.author_id],
+                        model=model,
+                        max_tokens=draft_tokens,
+                    )
+                )
+        except Exception as exc:
+            async with write_lock:
+                failed.append(passage.passage_id)
+                print(f"  [ERROR] {passage.passage_id}: {exc}", flush=True)
+            return None
+
         record = TripletRecord(
             passage_id=passage.passage_id,
             author_id=passage.author_id,
@@ -351,17 +360,31 @@ async def async_build_style_regen_triplets(
             )
         return record
 
-    # Truncate output file before starting (fresh run).
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(15)
+            elapsed = time.monotonic() - start
+            pending = total - completed - len(failed)
+            print(
+                f"  [heartbeat {elapsed:.0f}s] {completed}/{total} done | "
+                f"{len(failed)} failed | {pending} pending",
+                flush=True,
+            )
+
     output_path.write_text("")
-    # Truncate output file before starting.
-    output_path.write_text("")
-    records = list(await asyncio.gather(*[_process(p) for p in selected]))
+    heartbeat_task = asyncio.create_task(_heartbeat())
+    results = await asyncio.gather(*[_process(p) for p in selected])
+    heartbeat_task.cancel()
+
+    records = [r for r in results if r is not None]
     total_time = time.monotonic() - start
     print(
         f"\n[style-regen-async] done — {len(records)} triplets in {total_time:.1f}s "
         f"({len(records)/total_time:.1f}/s) → {output_path}",
         flush=True,
     )
+    if failed:
+        print(f"  {len(failed)} passages failed: {failed[:5]}", flush=True)
     return records
 
 
