@@ -46,6 +46,7 @@ def main() -> None:
     neutral.add_argument("--max-per-author", type=int)
     neutral.add_argument("--seed", type=int, default=7)
     neutral.add_argument("--dry-run", action="store_true")
+    neutral.add_argument("--quiet", action="store_true")
 
     style_regen = subparsers.add_parser(
         "style-regen",
@@ -64,6 +65,7 @@ def main() -> None:
     style_regen.add_argument("--structure-tokens", type=int, default=180)
     style_regen.add_argument("--draft-tokens", type=int, default=260)
     style_regen.add_argument("--dry-run", action="store_true")
+    style_regen.add_argument("--quiet", action="store_true")
 
     sample = subparsers.add_parser("sample", help="Print sampled anchor/positive/negative triplets.")
     sample.add_argument("--triplets", default="data/processed/triplets.jsonl")
@@ -101,6 +103,7 @@ def main() -> None:
             max_per_author=args.max_per_author,
             seed=args.seed,
             dry_run=args.dry_run,
+            verbose=not args.quiet,
         )
         print(json.dumps({"triplets": len(records), "output": args.out}, indent=2))
     elif args.command == "style-regen":
@@ -118,6 +121,7 @@ def main() -> None:
             structure_tokens=args.structure_tokens,
             draft_tokens=args.draft_tokens,
             dry_run=args.dry_run,
+            verbose=not args.quiet,
         )
         print(json.dumps({"triplets": len(records), "output": args.out}, indent=2))
     elif args.command == "sample":

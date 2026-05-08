@@ -102,6 +102,7 @@ def build_neutral_triplets(
     max_per_author: int | None = None,
     seed: int = 7,
     dry_run: bool = False,
+    verbose: bool = False,
 ) -> list[TripletRecord]:
     passages = load_passages(passages_path)
     if max_per_author is not None:
@@ -110,7 +111,9 @@ def build_neutral_triplets(
         passages = passages[:limit]
 
     records: list[TripletRecord] = []
-    for passage in passages:
+    for index, passage in enumerate(passages, start=1):
+        if verbose:
+            print(f"[neutral] {index}/{len(passages)} author={passage.author_id} passage={passage.passage_id}", flush=True)
         neutral_draft = (
             f"[DRY RUN neutral rewrite placeholder for {passage.passage_id}]\n\n{passage.text}"
             if dry_run
@@ -146,6 +149,7 @@ def build_style_regen_triplets(
     structure_tokens: int = 180,
     draft_tokens: int = 260,
     dry_run: bool = False,
+    verbose: bool = False,
 ) -> list[TripletRecord]:
     passages = load_passages(passages_path)
     selected = select_balanced_passages(
@@ -160,8 +164,15 @@ def build_style_regen_triplets(
 
     style_guides: dict[str, str] = {}
     records: list[TripletRecord] = []
-    for passage in selected:
+    if verbose:
+        print(f"[style-regen] selected {len(selected)} passages", flush=True)
+
+    for index, passage in enumerate(selected, start=1):
+        if verbose:
+            print(f"[style-regen] {index}/{len(selected)} author={passage.author_id} passage={passage.passage_id}", flush=True)
         if passage.author_id not in style_guides:
+            if verbose:
+                print(f"[style-regen] building style guide author={passage.author_id}", flush=True)
             guide_source = by_author[passage.author_id][:guide_examples]
             examples = [clip_text(p.text, guide_chars) for p in guide_source]
             style_guides[passage.author_id] = (
@@ -171,11 +182,15 @@ def build_style_regen_triplets(
             )
 
         source = clip_text(passage.text, source_chars)
+        if verbose:
+            print(f"[style-regen] extracting structure passage={passage.passage_id}", flush=True)
         structure_summary = (
             dry_run_structure(passage.passage_id)
             if dry_run
             else extract_structure(source, model=model, max_tokens=structure_tokens)
         )
+        if verbose:
+            print(f"[style-regen] regenerating draft passage={passage.passage_id}", flush=True)
         regenerated = (
             dry_run_regeneration(passage.passage_id, source)
             if dry_run
@@ -203,6 +218,8 @@ def build_style_regen_triplets(
         )
 
     write_jsonl(output_path, (record.to_dict() for record in records))
+    if verbose:
+        print(f"[style-regen] wrote {len(records)} triplets to {output_path}", flush=True)
     return records
 
 
