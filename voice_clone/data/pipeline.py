@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -265,7 +266,14 @@ async def async_build_style_regen_triplets(
 
     # Build all style guides first (one per author, small number of calls).
     author_ids = list({p.author_id for p in selected})
-    print(f"[async-style-regen] building {len(author_ids)} style guides ...", flush=True)
+    total = len(selected)
+    print(
+        f"\n[style-regen-async] {total} passages | {len(author_ids)} authors | "
+        f"concurrency={concurrency} | dry_run={dry_run}",
+        flush=True,
+    )
+    print(f"[style-regen-async] step 1/2 — building {len(author_ids)} style guides ...", flush=True)
+    guide_start = time.monotonic()
     style_guides: dict[str, str] = {}
     guide_sem = asyncio.Semaphore(min(len(author_ids), concurrency))
 
@@ -280,14 +288,22 @@ async def async_build_style_regen_triplets(
 
     for author_id, guide in await asyncio.gather(*[_build_guide(a) for a in author_ids]):
         style_guides[author_id] = guide
-        print(f"  style guide ready: {author_id}", flush=True)
+        print(f"  guide ready: {author_id}", flush=True)
+    print(
+        f"[style-regen-async] style guides done in {time.monotonic() - guide_start:.1f}s\n",
+        flush=True,
+    )
 
     # Process all passages concurrently, writing each record as it completes.
+    print(
+        f"[style-regen-async] step 2/2 — processing {total} passages ...",
+        flush=True,
+    )
     sem = asyncio.Semaphore(concurrency)
     write_lock = asyncio.Lock()
     records: list[TripletRecord] = []
     completed = 0
-    total = len(selected)
+    start = time.monotonic()
 
     async def _process(passage: Passage) -> TripletRecord:
         nonlocal completed
@@ -325,14 +341,27 @@ async def async_build_style_regen_triplets(
             completed += 1
             with open(output_path, "a") as fh:
                 fh.write(json.dumps(record.to_dict()) + "\n")
-            print(f"  [{completed}/{total}] {passage.author_id} {passage.passage_id}", flush=True)
+            elapsed = time.monotonic() - start
+            rate = completed / elapsed
+            eta = (total - completed) / rate if rate > 0 else 0
+            print(
+                f"  [{completed:4d}/{total}] {passage.author_id:20s} "
+                f"| {rate:.1f}/s | ETA {eta:.0f}s",
+                flush=True,
+            )
         return record
 
     # Truncate output file before starting (fresh run).
     output_path.write_text("")
-    print(f"[async-style-regen] processing {total} passages (concurrency={concurrency}) ...", flush=True)
+    # Truncate output file before starting.
+    output_path.write_text("")
     records = list(await asyncio.gather(*[_process(p) for p in selected]))
-    print(f"[async-style-regen] done — wrote {len(records)} triplets to {output_path}", flush=True)
+    total_time = time.monotonic() - start
+    print(
+        f"\n[style-regen-async] done — {len(records)} triplets in {total_time:.1f}s "
+        f"({len(records)/total_time:.1f}/s) → {output_path}",
+        flush=True,
+    )
     return records
 
 
